@@ -7,6 +7,7 @@ import os
 import requests
 from PIL import Image
 
+# ---------------- WATERMARK ----------------
 st.markdown("""
 <style>
 .footer-watermark {
@@ -14,7 +15,7 @@ st.markdown("""
     bottom: 8px;
     right: 12px;
     opacity: 0.35;
-    font-size: 35px;
+    font-size: 14px;
 }
 .footer-watermark a {
     color: gray;
@@ -32,61 +33,79 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-
-
+# CONFIG
 st.title("Emotion Detection")
 
-predict_img = st.file_uploader("Upload Image")
+MODEL_URL = "https://critic.blr1.digitaloceanspaces.com/e_commerce/product_images/alex_model_v6_full_optim.pt"
+MODEL_DIR = "models"
+MODEL_PATH = os.path.join(MODEL_DIR, "alex_model_v6_full_optim.pt")
+
+CLASS_NAMES = [
+    "angry", "disgust", "fear",
+    "happy", "neutral", "sad", "surprise"
+]
+
+# MODEL LOADER
+@st.cache_resource
+def load_model():
+    os.makedirs(MODEL_DIR, exist_ok=True)
+
+    if not os.path.exists(MODEL_PATH):
+        with st.spinner("Downloading model..."):
+            r = requests.get(MODEL_URL, stream=True, timeout=120)
+            r.raise_for_status()
+            with open(MODEL_PATH, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+    checkpoint = torch.load(
+        MODEL_PATH,
+        map_location="cpu"
+    )
+
+    model = alexnet(pretrained=False)
+    model.classifier[6] = nn.Linear(4096, 7)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+
+    return model
+
+# IMAGE UPLOAD
+uploaded_image = st.file_uploader(
+    "Upload an image",
+    type=["jpg", "jpeg", "png"]
+)
+
 predict_btn = st.button("Predict")
 
-if predict_btn and predict_img:
-    st.success("Image Uploaded")
+# PREDICTION
+if predict_btn:
+    if uploaded_image is None:
+        st.warning("Please upload an image")
+        st.stop()
 
-    MODEL_URL = "https://critic.blr1.digitaloceanspaces.com/e_commerce/product_images/alex_model_v6_full_optim.pt"
-    MODEL_PATH = "alex_model_v6_full_optim.pt"
+    image = Image.open(uploaded_image).convert("RGB")
+    st.image(image, caption="Uploaded Image", use_container_width=True)
 
-
-    @st.cache_resource
-    def load_checkpoint():
-        if not os.path.exists(MODEL_PATH):
-            os.makedirs("models", exist_ok=True)
-            with st.spinner("Downloading model..."):
-                r = requests.get(MODEL_URL, stream=True, timeout=120)
-                r.raise_for_status()
-                with open(MODEL_PATH, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-        return torch.load(MODEL_PATH,weights_only=False)
-
-
-    # img pre-process
-    predict_img = Image.open(predict_img).convert('RGB')
-    st.image(predict_img)
-
-    test_img_transformer = transforms.Compose([
+    transform = transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(224),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406],
-                             [0.229, 0.224, 0.225]),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
     ])
 
-    predict_transformed_img = test_img_transformer(predict_img)
+    img_tensor = transform(image).unsqueeze(0)
 
-    class_name = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
+    model = load_model()
 
-    ## prediction with model
-    checkpoint = load_checkpoint()
-    model = alexnet(pretrained=False)
-    model.classifier[6] = nn.Linear(4096,7)
-    model.load_state_dict(checkpoint['model_state'])
-    model.eval()
     with torch.inference_mode():
-        pred_logits = model(predict_transformed_img.unsqueeze(0))
-        pred_prob = torch.softmax(pred_logits, dim=1)
-        predict = pred_prob.argmax(dim=1).item()
+        logits = model(img_tensor)
+        probs = torch.softmax(logits, dim=1)
+        pred_idx = probs.argmax(dim=1).item()
 
-        st.title(f"your image is predicted as :red[{class_name[predict]}]".capitalize())
-
-else:
-    st.warning("Please upload an image")
+    st.success(
+        f"Predicted Emotion: **{CLASS_NAMES[pred_idx].capitalize()}**"
+    )
